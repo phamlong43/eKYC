@@ -1,0 +1,232 @@
+def create_transfer_learning_model():
+    # Tải mô hình pre-trained (không bao gồm fully connected layers ở cuối)
+    base_model = tf.keras.applications.MobileNetV2(
+        input_shape=(224, 224, 3),
+        include_top=False,
+        weights='imagenet'
+    )
+    
+    # Đóng băng các lớp của mô hình cơ sở
+    base_model.trainable = False
+    
+    # Tạo mô hình mới
+    model = tf.keras.Sequential([
+        base_model,
+        tf.keras.layers.GlobalAveragePooling2D(),
+        tf.keras.layers.Dense(128, activation='relu'),
+        tf.keras.layers.Dropout(0.5),
+        tf.keras.layers.Dense(num_classes, activation='softmax')
+    ])
+    
+    return model
+def preprocess_for_transfer_learning(img):
+    # Chuyển ảnh xám thành RGB (vì mô hình pre-trained yêu cầu đầu vào RGB)
+    img_rgb = cv2.cvtColor(img, cv2.COLOR_GRAY2RGB)
+    
+    # Thay đổi kích thước thành 224x224 (kích thước đầu vào của MobileNetV2)
+    img_resized = cv2.resize(img_rgb, (224, 224))
+    
+    # Tiền xử lý ảnh theo yêu cầu của mô hình pre-trained
+    img_preprocessed = tf.keras.applications.mobilenet_v2.preprocess_input(img_resized)
+    
+    return img_preprocessed
+
+def fine_tune_model(model, X_train, y_train, X_val, y_val):
+    # Giai đoạn 1: Huấn luyện chỉ các lớp mới được thêm vào
+    model.compile(
+        optimizer=tf.keras.optimizers.Adam(1e-4),
+        loss='sparse_categorical_crossentropy',
+        metrics=['accuracy']
+    )
+    
+    history = model.fit(
+        X_train, y_train,
+        epochs=10,
+        validation_data=(X_val, y_val),
+        batch_size=32
+    )
+    
+    # Giai đoạn 2: Mở đóng băng một số lớp cuối của mô hình cơ sở để fine-tune
+    base_model = model.layers[0]
+    # Mở khóa 20 lớp cuối cùng
+    for layer in base_model.layers[-20:]:
+        layer.trainable = True
+    
+    # Biên dịch lại mô hình với learning rate thấp hơn
+    model.compile(
+        optimizer=tf.keras.optimizers.Adam(1e-5),  # learning rate thấp hơn
+        loss='sparse_categorical_crossentropy',
+        metrics=['accuracy']
+    )
+    
+    # Tiếp tục huấn luyện
+    history_fine = model.fit(
+        X_train, y_train,
+        epochs=10,
+        validation_data=(X_val, y_val),
+        batch_size=32
+    )
+    
+    return model
+def create_data_augmentation():
+    data_augmentation = tf.keras.Sequential([
+        tf.keras.layers.RandomRotation(0.1),
+        tf.keras.layers.RandomZoom(0.1),
+        tf.keras.layers.RandomContrast(0.2),
+        tf.keras.layers.RandomBrightness(0.2)
+    ])
+    return data_augmentation
+
+# Sử dụng trong mô hình
+def create_model_with_augmentation():
+    base_model = tf.keras.applications.MobileNetV2(...)
+    
+    inputs = tf.keras.Input(shape=(224, 224, 3))
+    data_augmentation = create_data_augmentation()
+    
+    x = data_augmentation(inputs)
+    x = base_model(x, training=False)
+    x = tf.keras.layers.GlobalAveragePooling2D()(x)
+    # ...
+    outputs = tf.keras.layers.Dense(num_classes, activation='softmax')(x)
+    
+    return tf.keras.Model(inputs, outputs)
+
+def cache_features(base_model, dataset):
+    # Trích xuất đặc trưng từ base model
+    features = base_model.predict(dataset)
+    return features
+
+# Sử dụng đặc trưng đã cache
+def train_top_model(features_train, y_train, features_val, y_val):
+    model = tf.keras.Sequential([
+        tf.keras.layers.Dense(128, activation='relu'),
+        tf.keras.layers.Dropout(0.5),
+        tf.keras.layers.Dense(num_classes, activation='softmax')
+    ])
+    
+    model.compile(...)
+    model.fit(features_train, y_train, validation_data=(features_val, y_val), ...)
+    
+    return model
+
+def create_full_model(base_model, top_model):
+    base_model.trainable = True
+    
+    # Đóng băng các lớp sớm
+    for layer in base_model.layers[:-20]:
+        layer.trainable = False
+    
+    inputs = tf.keras.Input(shape=(224, 224, 3))
+    x = base_model(inputs)
+    outputs = top_model(x)
+    
+    model = tf.keras.Model(inputs, outputs)
+    
+    return model
+
+
+def optimize_hyperparameters():
+    hp = keras_tuner.HyperParameters()
+    
+    def build_model(hp):
+        base_model = tf.keras.applications.MobileNetV2(...)
+        base_model.trainable = False
+        
+        model = tf.keras.Sequential([
+            base_model,
+            tf.keras.layers.GlobalAveragePooling2D(),
+            tf.keras.layers.Dense(
+                units=hp.Int('units', min_value=64, max_value=256, step=64),
+                activation='relu'
+            ),
+            tf.keras.layers.Dropout(hp.Float('dropout', min_value=0.2, max_value=0.5, step=0.1)),
+            tf.keras.layers.Dense(num_classes, activation='softmax')
+        ])
+        
+        model.compile(
+            optimizer=tf.keras.optimizers.Adam(
+                hp.Float('learning_rate', min_value=1e-5, max_value=1e-3, sampling='log')
+            ),
+            loss='sparse_categorical_crossentropy',
+            metrics=['accuracy']
+        )
+        
+        return model
+    
+    tuner = keras_tuner.RandomSearch(
+        build_model,
+        objective='val_accuracy',
+        max_trials=10,
+        directory='hyperparameter_tuning',
+        project_name='palm_auth'
+    )
+    
+    tuner.search(...)
+    
+    best_model = tuner.get_best_models(num_models=1)[0]
+    return best_model
+
+
+def evaluate_model(model, X_test, y_test):
+    # Đánh giá độ chính xác
+    test_loss, test_acc = model.evaluate(X_test, y_test)
+    
+    # Tạo ma trận nhầm lẫn
+    y_pred = model.predict(X_test)
+    y_pred_classes = np.argmax(y_pred, axis=1)
+    
+    cm = confusion_matrix(y_test, y_pred_classes)
+    
+    # Tính các metrics
+    precision = precision_score(y_test, y_pred_classes, average='weighted')
+    recall = recall_score(y_test, y_pred_classes, average='weighted')
+    f1 = f1_score(y_test, y_pred_classes, average='weighted')
+    
+    # Vẽ ROC curve cho mỗi lớp (one-vs-rest)
+    n_classes = len(np.unique(y_test))
+    y_test_binary = label_binarize(y_test, classes=range(n_classes))
+    
+    fpr = {}
+    tpr = {}
+    roc_auc = {}
+    
+    for i in range(n_classes):
+        fpr[i], tpr[i], _ = roc_curve(y_test_binary[:, i], y_pred[:, i])
+        roc_auc[i] = auc(fpr[i], tpr[i])
+    
+    # In kết quả và vẽ biểu đồ...
+    
+    return {
+        'accuracy': test_acc,
+        'precision': precision,
+        'recall': recall,
+        'f1_score': f1,
+        'confusion_matrix': cm,
+        'roc_auc': roc_auc
+    }
+
+
+
+# Khi nào nên sử dụng Transfer Learning cho xác thực lòng bàn tay
+
+# Khi bạn có ít dữ liệu (dưới 1000 mẫu/người dùng)
+# Khi cần đạt độ chính xác cao nhanh chóng
+# Khi có giới hạn về tài nguyên tính toán
+# Khi muốn tận dụng các đặc trưng tổng quát đã được học từ dữ liệu lớn
+
+# Mô hình nào phù hợp nhất cho Transfer Learning với lòng bàn tay:
+
+# MobileNetV2/V3: Nhẹ, nhanh, phù hợp cho thiết bị di động
+# EfficientNet: Cân bằng giữa hiệu suất và kích thước mô hình
+# ResNet50: Ổn định và có hiệu suất tốt cho nhiều loại ảnh
+# DenseNet121: Tốt cho việc phát hiện các đặc trưng mịn
+
+# Chiến lược huấn luyện hiệu quả
+
+# Bắt đầu với việc đóng băng toàn bộ mô hình cơ sở
+# Huấn luyện các lớp mới thêm vào (1-3 epochs)
+# Mở khóa các lớp cuối cùng và fine-tune với learning rate thấp
+# Sử dụng kỹ thuật early stopping để tránh overfitting
+# Áp dụng learning rate scheduling để giảm dần learning rate
+# Lưu lại các checkpoint tốt nhất
